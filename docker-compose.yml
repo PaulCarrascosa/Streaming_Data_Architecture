@@ -1,0 +1,168 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.9.4
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - streaming-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.9.4
+    container_name: kafka
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_CLEANUP_POLICY: delete
+    depends_on:
+      - zookeeper
+    networks:
+      - streaming-network
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    depends_on:
+      - kafka
+    networks:
+      - streaming-network
+
+  fastapi-backend:
+    build:
+      context: ./fastapi-backend
+      dockerfile: Dockerfile
+    container_name: fastapi-backend
+    ports:
+      - "8000:8000"
+      - "5678:5678"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: test-topic
+      ENVIRONMENT: development
+      OLLAMA_BASE_URL: http://ollama:11434
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      kafka:
+        condition: service_started
+    networks:
+      - streaming-network
+    restart: on-failure
+
+  bytewax-consumer:
+    build:
+      context: ./bytewax-consumer
+      dockerfile: Dockerfile
+    container_name: bytewax-consumer
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      INPUT_TOPIC: in-topic
+      OUTPUT_TOPIC: out-topic
+      DRIVER_HOST: bytewax-consumer
+      SPARK_MASTER_HOST: spark-master
+    depends_on:
+      kafka:
+        condition: service_started
+      spark-master:
+        condition: service_started
+    networks:
+      - streaming-network
+    restart: on-failure
+
+  spark-master:
+    image: apache/spark:4.0.1-scala2.13-java21-python3-ubuntu
+    environment:
+      - SPARK_MODE=master
+      - SPARK_MASTER_HOST=spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master --host spark-master
+    ports:
+      - "7077:7077"   # Spark master port
+      - "7078:8080"   # Spark master web UI
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - streaming-network
+
+  spark-worker:
+    build:
+      context: ./spark-worker
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    depends_on:
+      - spark-master
+    ports:
+      - "8081:8081"  # Spark worker web UI
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - streaming-network
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.2.3
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+      - http.cors.enabled=true
+      - http.cors.allow-origin=/https?:\/\/.*/
+      - http.cors.allow-headers=X-Requested-With,Content-Type,Content-Length,Authorization
+    ports:
+      - "9200:9200"
+    networks:
+      - streaming-network
+
+  react-front:
+    build:
+      context: ./react-front
+    container_name: react-front
+    ports:
+      - "5174:5174"
+    networks:
+      - streaming-network
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - streaming-network
+
+networks:
+  streaming-network:
+    driver: bridge
+
+volumes:
+  ollama-data:
+
